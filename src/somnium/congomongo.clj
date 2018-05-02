@@ -26,9 +26,24 @@
             [clojure.walk :refer (postwalk)]
             [somnium.congomongo.config :refer [*mongo-config*]]
             [somnium.congomongo.coerce :refer [coerce coerce-fields coerce-index-fields]])
-  (:import  [com.mongodb MongoClient MongoClientOptions MongoClientOptions$Builder MongoClientURI
-             DB DBCollection DBObject DBRef ServerAddress ReadPreference WriteConcern Bytes DBCursor
-             AggregationOptions AggregationOptions$OutputMode]
+  (:import  [com.mongodb
+              AggregationOptions
+              AggregationOptions$OutputMode
+              Bytes
+              DB
+              DBCollection
+              DBCursor
+              DBObject
+              DBRef
+              MapReduceCommand
+              MapReduceCommand$OutputType
+              MongoClient
+              MongoClientOptions
+              MongoClientOptions$Builder
+              MongoClientURI
+              ReadPreference
+              ServerAddress
+              WriteConcern]
             [com.mongodb.gridfs GridFS]
             [com.mongodb.util JSON]
             [org.bson.types ObjectId]))
@@ -229,19 +244,11 @@ releases.  Please use 'make-connection' in combination with
 
 (def write-concern-map
   {:acknowledged         WriteConcern/ACKNOWLEDGED
-   :errors-ignored       WriteConcern/ERRORS_IGNORED
    :fsynced              WriteConcern/FSYNCED
    :journaled            WriteConcern/JOURNALED
    :majority             WriteConcern/MAJORITY
    :replica-acknowledged WriteConcern/REPLICA_ACKNOWLEDGED
    :unacknowledged       WriteConcern/UNACKNOWLEDGED
-   ;; these are pre-2.10.x names for write concern:
-   :fsync-safe    WriteConcern/FSYNC_SAFE  ;; deprecated - use :fsynced
-   :journal-safe  WriteConcern/JOURNAL_SAFE ;; deprecated - use :journaled
-   :none          WriteConcern/NONE ;; deprecated - use :errors-ignored
-   :normal        WriteConcern/NORMAL ;; deprecated - use :unacknowledged
-   :replicas-safe WriteConcern/REPLICAS_SAFE ;; deprecated - use :replica-acknowledged
-   :safe          WriteConcern/SAFE ;; deprecated - use :acknowledged
    ;; these are left for backward compatibility but are deprecated:
    :replica-safe WriteConcern/REPLICAS_SAFE
    :strict       WriteConcern/SAFE
@@ -602,7 +609,7 @@ You should use fetch with :limit 1 instead."))); one? and sort should NEVER be c
    [c f & {:keys [name unique sparse background]
            :or {name nil unique false sparse false background false}}]
    (-> (get-coll c)
-       (.ensureIndex (coerce-index-fields f) ^DBObject (coerce (merge {:unique unique :sparse sparse :background background}
+       (.createIndex (coerce-index-fields f) ^DBObject (coerce (merge {:unique unique :sparse sparse :background background}
                                                                        (if name {:name name}))
                                                                 [:clojure :mongo]))))
 (defn drop-index!
@@ -818,21 +825,20 @@ You should use fetch with :limit 1 instead."))); one? and sort should NEVER be c
                                          limit nil finalize nil scope nil scope-from :clojure output :documents as :clojure}}]
   (let [;; BasicDBObject requires key-value pairs in the correct order... apparently the first one
         ;; must be :mapreduce
-        mr-query (->> [[:mapreduce collection]
-                       [:map mapfn]
-                       [:reduce reducefn]
-                       [:out (coerce out [out-from :mongo])]
-                       [:verbose true]
-                       (when query [:query (coerce query [query-from :mongo])])
-                       (when sort [:sort (coerce sort [sort-from :mongo])])
-                       (when limit [:limit limit])
-                       (when finalize [:finalize finalize])
-                       (when scope [:scope (coerce scope [scope-from :mongo])])]
-                      (remove nil?)
-                      flatten
-                      (apply array-map))
-        mr-query (coerce mr-query [:clojure :mongo])
-        ^com.mongodb.MapReduceOutput result (.mapReduce (get-coll collection) ^DBObject mr-query)]
+        ^MapReduceCommand mr-query (MapReduceCommand.
+                    (get-coll collection)
+                    ^String mapfn
+                    ^String reducefn
+                    ^String (if (map? out) (val (first out)) (name out))
+                    ^MapReduceCommand$OutputType
+                    (case (and (map? out) (key (first out)))
+                      :merge MapReduceCommand$OutputType/MERGE
+                      :reduce MapReduceCommand$OutputType/REDUCE
+                      :inline MapReduceCommand$OutputType/INLINE
+                      MapReduceCommand$OutputType/REPLACE)
+                    ^DBObject
+                    (coerce query [query-from :mongo]))
+        ^com.mongodb.MapReduceOutput result (.mapReduce (get-coll collection) mr-query)]
     (if (or (= output :documents)
             (= (coerce out [out-from :clojure])
                {:inline 1}))
@@ -862,9 +868,15 @@ You should use fetch with :limit 1 instead."))); one? and sort should NEVER be c
   (coerce (.group ^DBCollection
             (get-coll coll)
             ^DBObject
-            (coerce (into {} (filter second {:key (when key (coerce-fields key))
-                     :$keyf keyfn
-                     :$reduce reducefn
-                     :finalize finalizefn
-                     :initial initial
-                     :cond where})) [:clojure :mongo ])) [:mongo as]))
+            (coerce
+              (if key (coerce-fields key) {:keyf keyfn})
+              [:clojure :mongo])
+            ^DBObject
+            (coerce where [:clojure :mongo])
+            ^DBObject
+            (coerce initial [:clojure :mongo])
+            ^String
+            reducefn
+            ^String
+            finalizefn)
+          [:mongo as]))
